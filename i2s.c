@@ -382,6 +382,80 @@ void i2s_slave_init(void){
     pio_sm_set_enabled(pio, sm, true);
 }
 
+void i2s_input_init(void){
+    pio_sm_config sm_config, sm_config_mclk;
+    PIO pio = i2s_pio;
+    uint data_pin = i2s_dout_pin;
+    uint clock_pin_base = i2s_clk_pin_base;
+    uint offset, offset_mclk;
+    uint pin_mask;
+
+    // pins init
+    pio_gpio_init(pio, data_pin);
+    gpio_set_dir(data_pin, GPIO_IN);
+    pio_gpio_init(pio, clock_pin_base);
+    pio_gpio_init(pio, clock_pin_base + 1);
+    pio_gpio_init(pio, i2s_mclk_pin);
+
+    // mclk init
+    pio_sm_set_consecutive_pindirs(pio, i2s_mclk_sm, i2s_mclk_pin, 1, true);
+    offset_mclk = pio_add_program(pio, &i2s_mclk_program);
+    sm_config_mclk = i2s_mclk_program_get_default_config(offset_mclk);
+    sm_config_set_set_pins(&sm_config_mclk, i2s_mclk_pin, 1);
+    pio_sm_init(pio, i2s_mclk_sm, offset_mclk, &sm_config_mclk);
+    pio_sm_set_enabled(pio, i2s_mclk_sm, true);
+
+    // i2s data init
+    offset = pio_add_program(pio, &i2s_input_program);
+    sm_config = i2s_input_program_get_default_config(offset);
+    sm_config_set_in_pins(&sm_config, data_pin);
+    sm_config_set_sideset_pins(&sm_config, clock_pin_base);
+    sm_config_set_in_shift(&sm_config, false, true, 32);
+    sm_config_set_fifo_join(&sm_config, PIO_FIFO_JOIN_RX);
+
+    pio_sm_init(pio, i2s_sm, offset, &sm_config);
+    pin_mask = (3u << clock_pin_base);
+    pio_sm_set_pindirs_with_mask(pio, i2s_sm, pin_mask, pin_mask);
+    pio_sm_set_consecutive_pindirs(pio, i2s_sm, data_pin, 1, false);
+    pio_sm_exec(pio, i2s_sm, pio_encode_jmp(offset));
+    pio_sm_set_pins(pio, i2s_sm, 0);
+    pio_sm_clear_fifos(pio, i2s_sm);
+    pio_sm_set_enabled(pio, i2s_sm, true);
+}
+
+void i2s_slave_input_init(void){
+    pio_sm_config sm_config;
+    PIO pio = i2s_pio;
+    uint sm = i2s_sm;
+    uint data_pin = i2s_dout_pin;
+    uint clock_pin_base = i2s_clk_pin_base;
+    uint offset;
+    
+    // Pin Init
+    pio_gpio_init(pio, data_pin);
+    pio_gpio_init(pio, clock_pin_base);     // BCLK
+    pio_gpio_init(pio, clock_pin_base + 1); // LRCK
+    
+    // Set arah pin (Input semua)
+    pio_sm_set_consecutive_pindirs(pio, sm, data_pin, 1, false);
+    pio_sm_set_consecutive_pindirs(pio, sm, clock_pin_base, 2, false);
+    
+    offset = pio_add_program(pio, &i2s_slave_input_program);
+    sm_config = i2s_slave_input_program_get_default_config(offset);
+    
+    sm_config_set_in_pins(&sm_config, data_pin);
+    sm_config_set_in_pin_base(&sm_config, data_pin); // <--- Ubah ke data_pin (GPIO 10)
+    
+    sm_config_set_in_shift(&sm_config, false, true, 32);
+    sm_config_set_fifo_join(&sm_config, PIO_FIFO_JOIN_RX);
+    
+    // Clock divider diset ke 1 karena kita sinkron dengan BCLK eksternal
+    sm_config_set_clkdiv(&sm_config, 1.0);
+    
+    pio_sm_init(pio, sm, offset, &sm_config);
+    pio_sm_set_enabled(pio, sm, true);
+}
+
 void i2s_mclk_init(uint32_t audio_clock){
     pio_sm_config sm_config, sm_config_mclk;
     PIO pio = i2s_pio;
@@ -406,6 +480,12 @@ void i2s_mclk_init(uint32_t audio_clock){
         case MODE_I2S_SLAVE:
             i2s_slave_init();
             break;
+        case MODE_I2S_INPUT:
+            i2s_input_init();
+            break;
+        case MODE_I2S_SLAVE_INPUT:
+            i2s_slave_input_init();
+            break;
     }
     i2s_mclk_change_clock(audio_clock);
 
@@ -413,19 +493,33 @@ void i2s_mclk_init(uint32_t audio_clock){
     i2s_dma_chan_a = dma_claim_unused_channel(true);
     dma_channel_config conf = dma_channel_get_default_config(i2s_dma_chan_a);
     
-    channel_config_set_read_increment(&conf, true);
-    channel_config_set_write_increment(&conf, false);
-    channel_config_set_transfer_data_size(&conf, DMA_SIZE_32);
-    channel_config_set_dreq(&conf, pio_get_dreq(pio, i2s_sm, true));
+    if (i2s_mode == MODE_I2S_INPUT || i2s_mode == MODE_I2S_SLAVE_INPUT) {
+        channel_config_set_read_increment(&conf, false);
+        channel_config_set_write_increment(&conf, true);
+        channel_config_set_dreq(&conf, pio_get_dreq(pio, i2s_sm, false));
+        dma_channel_configure(
+            i2s_dma_chan_a,
+            &conf,
+            NULL,
+            &i2s_pio->rxf[i2s_sm],
+            0,
+            false
+        );
+    } else {
+        channel_config_set_read_increment(&conf, true);
+        channel_config_set_write_increment(&conf, false);
+        channel_config_set_dreq(&conf, pio_get_dreq(pio, i2s_sm, true));
+        dma_channel_configure(
+            i2s_dma_chan_a,
+            &conf,
+            &i2s_pio->txf[i2s_sm],
+            NULL,
+            0,
+            false
+        );
+    }
     
-    dma_channel_configure(
-        i2s_dma_chan_a,
-        &conf,
-        &i2s_pio->txf[i2s_sm],
-        NULL,
-        0,
-        false
-    );
+    channel_config_set_transfer_data_size(&conf, DMA_SIZE_32);
 
     if (i2s_mode == MODE_I2S_DUAL || i2s_mode == MODE_PT8211_DUAL || i2s_mode == MODE_EXDF){
         i2s_dma_chan_b = dma_claim_unused_channel(true);
@@ -451,7 +545,7 @@ void i2s_mclk_change_clock(uint32_t audio_clock){
     // 周波数変更
     atomic_store(&i2s_freq, audio_clock);
     
-    if (i2s_mode == MODE_I2S_SLAVE){
+    if (i2s_mode == MODE_I2S_SLAVE || i2s_mode == MODE_I2S_SLAVE_INPUT){
         if (audio_clock % 48000 == 0){
             // ここで外部のクロック変更
             // picoのGPIOクロック出力だとクロック間の同期ができない
@@ -718,6 +812,47 @@ int i2s_format_piodata(int32_t *buf_l, int32_t *buf_r, int length, uint32_t *tx_
     return length;
 }
 
+int i2s_parse_piodata(uint32_t *rx_buf, int length, int32_t *buf_l, int32_t *buf_r){
+    int sample = length / 2;
+    for (int i = 0; i < sample; i++){
+        buf_l[i] = rx_buf[i * 2];
+        buf_r[i] = rx_buf[i * 2 + 1];
+    }
+    return sample;
+}
+
+int i2s_pack_uacdata(int32_t *buf_l, int32_t *buf_r, int sample, uint8_t resolution, uint8_t *out){
+    if (resolution == 16){
+        int16_t *d = (int16_t*)out;
+        for (int i = 0; i < sample; i++){
+            *d++ = (int16_t)(buf_l[i] >> 16);
+            *d++ = (int16_t)(buf_r[i] >> 16);
+        }
+        return sample * 4;
+    }
+    else if (resolution == 24){
+        uint8_t *d = out;
+        for (int i = 0; i < sample; i++){
+            *d++ = (uint8_t)(buf_l[i] >> 8);
+            *d++ = (uint8_t)(buf_l[i] >> 16);
+            *d++ = (uint8_t)(buf_l[i] >> 24);
+            *d++ = (uint8_t)(buf_r[i] >> 8);
+            *d++ = (uint8_t)(buf_r[i] >> 16);
+            *d++ = (uint8_t)(buf_r[i] >> 24);
+        }
+        return sample * 6;
+    }
+    else if (resolution == 32){
+        int32_t *d = (int32_t*)out;
+        for (int i = 0; i < sample; i++){
+            *d++ = buf_l[i];
+            *d++ = buf_r[i];
+        }
+        return sample * 8;
+    }
+    return 0;
+}
+
 void i2s_dma_transfer_blocking(int32_t *tx_buf_a, int32_t *tx_buf_b, int tx_length){
     if (i2s_mode == MODE_I2S_DUAL || i2s_mode == MODE_PT8211_DUAL || i2s_mode == MODE_EXDF){
         uint32_t mask = (1u << i2s_dma_chan_a) | (1u << i2s_dma_chan_b);
@@ -730,10 +865,18 @@ void i2s_dma_transfer_blocking(int32_t *tx_buf_a, int32_t *tx_buf_b, int tx_leng
 
         dma_start_channel_mask(mask);
     }
+    else if (i2s_mode == MODE_I2S_INPUT || i2s_mode == MODE_I2S_SLAVE_INPUT) {
+        dma_channel_wait_for_finish_blocking(i2s_dma_chan_a);
+        dma_channel_transfer_to_buffer_now(i2s_dma_chan_a, tx_buf_a, tx_length);
+    }
     else{
         dma_channel_wait_for_finish_blocking(i2s_dma_chan_a);
         dma_channel_transfer_from_buffer_now(i2s_dma_chan_a, tx_buf_a, tx_length);
     }
+}
+
+void i2s_clear_fifo(void) {
+    pio_sm_clear_fifos(i2s_pio, i2s_sm);
 }
 
 uint32_t i2s_get_freq(void){

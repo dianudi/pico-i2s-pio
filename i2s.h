@@ -42,7 +42,9 @@ typedef enum {
     MODE_EXDF,
     MODE_I2S_DUAL,
     MODE_PT8211_DUAL,
-    MODE_I2S_SLAVE
+    MODE_I2S_SLAVE,
+    MODE_I2S_INPUT,
+    MODE_I2S_SLAVE_INPUT
 } I2S_MODE;
 
 typedef enum {
@@ -166,6 +168,29 @@ void i2s_volume(int32_t *buf_l, int32_t *buf_r, int length);
 int i2s_format_piodata(int32_t *buf_l, int32_t *buf_r, int length, uint32_t *tx_buf_a, uint32_t *tx_buf_b);
 
 /**
+ * @brief PIO受信データをL/Rに分離
+ * 
+ * @param rx_buf 受信バッファ
+ * @param length データ長
+ * @param buf_l Lch出力バッファ
+ * @param buf_r Rch出力バッファ
+ * @return 変換後のサンプル数
+ */
+int i2s_parse_piodata(uint32_t *rx_buf, int length, int32_t *buf_l, int32_t *buf_r);
+
+/**
+ * @brief 32bit整数をUSBオーディオデータ(パッキング)へ変換
+ * 
+ * @param buf_l Lch入力データ
+ * @param buf_r Rch入力データ
+ * @param sample サンプル数
+ * @param resolution ビット深度 (16, 24, 32)
+ * @param out 出力バッファ
+ * @return 生成されたデータ長 (バイト数)
+ */
+int i2s_pack_uacdata(int32_t *buf_l, int32_t *buf_r, int sample, uint8_t resolution, uint8_t *out);
+
+/**
  * @brief DMA転送の開始 (ブロッキング待機含む)
  * 
  * @param tx_buf_a 送信バッファA
@@ -174,6 +199,8 @@ int i2s_format_piodata(int32_t *buf_l, int32_t *buf_r, int length, uint32_t *tx_
  * @note Dual/EXDFモード時は、送信バッファBのデータが data_pin+1 に出力されます。
  */
 void i2s_dma_transfer_blocking(int32_t *tx_buf_a, int32_t *tx_buf_b, int tx_length);
+
+void i2s_clear_fifo(void);
 
 /**
  * @brief 現在のi2sサンプリングレート取得
